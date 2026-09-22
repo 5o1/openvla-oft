@@ -15,6 +15,12 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 
 ACTION_DIM = 7
 NUM_ACTIONS_CHUNK = 8
+_MISSING_MODULE = object()
+_SYNTHETIC_MODULE_NAMES = (
+    "prismatic",
+    "prismatic.vla",
+    "prismatic.vla.constants",
+)
 
 
 def _load_action_heads_module():
@@ -27,23 +33,32 @@ def _load_action_heads_module():
     constants.PROPRIO_DIM = 8
     constants.STOP_INDEX = 2
 
-    prismatic = types.ModuleType("prismatic")
-    prismatic.__path__ = []
-    vla = types.ModuleType("prismatic.vla")
-    vla.__path__ = []
-    sys.modules["prismatic"] = prismatic
-    sys.modules["prismatic.vla"] = vla
-    sys.modules["prismatic.vla.constants"] = constants
+    previous_modules = {name: sys.modules.get(name, _MISSING_MODULE) for name in _SYNTHETIC_MODULE_NAMES}
+    try:
+        prismatic = types.ModuleType("prismatic")
+        prismatic.__path__ = []
+        vla = types.ModuleType("prismatic.vla")
+        vla.__path__ = []
+        sys.modules["prismatic"] = prismatic
+        sys.modules["prismatic.vla"] = vla
+        sys.modules["prismatic.vla.constants"] = constants
 
-    path = Path(__file__).parents[1] / "prismatic" / "models" / "action_heads.py"
-    spec = importlib.util.spec_from_file_location("action_heads_under_test", path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"could not load {path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+        path = Path(__file__).parents[1] / "prismatic" / "models" / "action_heads.py"
+        spec = importlib.util.spec_from_file_location("action_heads_under_test", path)
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"could not load {path}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    finally:
+        for name, previous_module in previous_modules.items():
+            if previous_module is _MISSING_MODULE:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = previous_module
 
 
+_PRISMATIC_MODULES_BEFORE_LOAD = {name: sys.modules.get(name, _MISSING_MODULE) for name in _SYNTHETIC_MODULE_NAMES}
 ACTION_HEADS = _load_action_heads_module()
 DiffusionActionHead = ACTION_HEADS.DiffusionActionHead
 L1RegressionActionHead = ACTION_HEADS.L1RegressionActionHead
@@ -100,6 +115,10 @@ def _ddp_step(rank: int, world_size: int, init_file: str, kind: str) -> None:
 
 
 class ActionHeadDDPTest(unittest.TestCase):
+    def test_action_head_loader_restores_sys_modules(self) -> None:
+        for name, previous_module in _PRISMATIC_MODULES_BEFORE_LOAD.items():
+            self.assertIs(sys.modules.get(name, _MISSING_MODULE), previous_module)
+
     def test_training_source_calls_ddp_wrapper(self) -> None:
         source = (Path(__file__).parents[1] / "vla-scripts" / "finetune.py").read_text(encoding="utf-8")
 
